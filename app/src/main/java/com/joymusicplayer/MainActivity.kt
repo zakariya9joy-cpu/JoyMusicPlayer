@@ -1,10 +1,11 @@
+
 package com.joymusicplayer
 
 import android.Manifest
 import android.app.Activity
 import android.content.ContentUris
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,13 +13,12 @@ import android.provider.MediaStore
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
 
-    private var player: MediaPlayer? = null
-    private var currentUri: Uri? = null
     private lateinit var songList: LinearLayout
     private lateinit var status: TextView
 
@@ -29,6 +29,7 @@ class MainActivity : Activity() {
     )
 
     private val songs = mutableListOf<Song>()
+    private var currentIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,8 +69,34 @@ class MainActivity : Activity() {
             textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(0xFFBBBBBB.toInt())
-            setPadding(8, 20, 8, 20)
+            setPadding(8, 16, 8, 16)
         }
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        fun controlButton(label: String, action: String): Button {
+            return Button(this).apply {
+                text = label
+                isAllCaps = false
+                setOnClickListener { sendPlaybackAction(action) }
+            }
+        }
+
+        controls.addView(
+            controlButton("⏮ Previous", MusicService.ACTION_PREVIOUS),
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        controls.addView(
+            controlButton("▶ / ⏸", MusicService.ACTION_TOGGLE),
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        controls.addView(
+            controlButton("Next ⏭", MusicService.ACTION_NEXT),
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
 
         val refresh = Button(this).apply {
             text = "গান আবার খুঁজুন"
@@ -80,23 +107,36 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
         }
 
-        val scroll = android.widget.ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             addView(songList)
         }
 
         root.addView(heading)
         root.addView(status)
+        root.addView(controls)
         root.addView(refresh)
         root.addView(
             scroll,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
+            LinearLayout.LayoutParams(-1, 0, 1f)
         )
 
         setContentView(root)
+    }
+
+    private fun sendPlaybackAction(action: String) {
+        val intent = Intent(this, MusicService::class.java).apply {
+            this.action = action
+        }
+
+        try {
+            startService(intent)
+        } catch (_: Exception) {
+            Toast.makeText(
+                this,
+                "আগে একটি গান চালু করো",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     private fun loadSongs() {
@@ -148,63 +188,56 @@ class MainActivity : Activity() {
         }
 
         status.text = if (songs.isEmpty()) {
-            "কোনো গান পাওয়া যায়নি। ফোনে অডিও ফাইল রাখো।"
+            "কোনো গান পাওয়া যায়নি।"
         } else {
             "মোট ${songs.size}টি গান পাওয়া গেছে"
         }
 
-        songs.forEach { song ->
+        songs.forEachIndexed { index, song ->
             val button = Button(this).apply {
                 text = "${song.title}\n${song.artist}"
                 isAllCaps = false
-                setOnClickListener { playSong(song) }
+                setOnClickListener {
+                    currentIndex = index
+                    playSong(index)
+                }
             }
+            songList.addView(button)
+        }
+    }
 
-            songList.addView(
-                button,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+    private fun playSong(index: Int) {
+        if (songs.isEmpty() || index !in songs.indices) return
+
+        currentIndex = index
+
+        val intent = Intent(this, MusicService::class.java).apply {
+            action = MusicService.ACTION_PLAY_QUEUE
+            putStringArrayListExtra(
+                MusicService.EXTRA_URIS,
+                ArrayList(songs.map { it.uri.toString() })
             )
+            putStringArrayListExtra(
+                MusicService.EXTRA_TITLES,
+                ArrayList(songs.map { it.title })
+            )
+            putStringArrayListExtra(
+                MusicService.EXTRA_ARTISTS,
+                ArrayList(songs.map { it.artist })
+            )
+            putExtra(MusicService.EXTRA_INDEX, currentIndex)
         }
-    }
 
-    private fun playSong(song: Song) {
         try {
-            player?.release()
-            player = MediaPlayer().apply {
-                setDataSource(this@MainActivity, song.uri)
-                setOnPreparedListener { mp ->
-                    mp.start()
-                    currentUri = song.uri
-                    status.text = "এখন চলছে: ${song.title}"
-                }
-                setOnCompletionListener { mp ->
-                    mp.release()
-                    player = null
-                    playNext()
-                }
-                setOnErrorListener { mp, _, _ ->
-                    mp.release()
-                    player = null
-                    status.text = "গান চালানো যায়নি"
-                    true
-                }
-                prepareAsync()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
             }
+            status.text = "নির্বাচিত গান: ${songs[index].title}"
         } catch (e: Exception) {
-            status.text = "প্লেব্যাক ত্রুটি"
-            Toast.makeText(
-                this, "গান চালানো যায়নি", Toast.LENGTH_SHORT
-            ).show()
+            status.text = "গান চালু করা যায়নি: ${e.message}"
         }
-    }
-
-    private fun playNext() {
-        if (songs.isEmpty()) return
-        val index = songs.indexOfFirst { it.uri == currentUri }
-        playSong(songs[(index + 1).mod(songs.size)])
     }
 
     override fun onRequestPermissionsResult(
@@ -224,11 +257,5 @@ class MainActivity : Activity() {
         } else {
             status.text = "গান দেখাতে অডিও অনুমতি প্রয়োজন"
         }
-    }
-
-    override fun onDestroy() {
-        player?.release()
-        player = null
-        super.onDestroy()
     }
 }
